@@ -17,6 +17,8 @@ SWIFT_SOURCES=(
     "${SRC_DIR}/MenuBarController.swift"
     "${SRC_DIR}/MockTrainData.swift"
     "${SRC_DIR}/StatusBarImageGenerator.swift"
+    "${SRC_DIR}/TrainPanelModel.swift"
+    "${SRC_DIR}/TrainPanelView.swift"
 )
 
 echo "🔨 Compilation de ${APP_NAME} (binaire universel arm64 + x86_64)…"
@@ -50,17 +52,39 @@ rm -f "/tmp/${APP_NAME}_arm64" "/tmp/${APP_NAME}_x86_64"
 # Info.plist dans Contents/ (pas Resources/)
 cp Resources/Info.plist "${CONTENTS}/Info.plist"
 
-# Nettoyer tous les extended attributes (resource forks, quarantaine…) avant de signer
-find "${APP_BUNDLE}" -exec xattr -c {} \; 2>/dev/null || true
+# Icône de l'app (Launchpad / Finder) si présente. Régénérable via scripts/make_icon.sh
+if [[ -f Resources/AppIcon.icns ]]; then
+    cp Resources/AppIcon.icns "${RESOURCES_DIR}/AppIcon.icns"
+fi
 
 # Signature ad-hoc : indispensable pour que TCC (Location Services) reconnaisse l'app
 # -s -          : signature ad-hoc (pas de certificat developer requis)
 # --deep        : signe aussi les frameworks/plugins embarqués
 # --force       : remplace toute signature existante
-codesign --force --deep -s - \
-    --identifier "fr.sncf.wifi-widget" \
-    --entitlements "Resources/entitlements.plist" \
-    "${APP_BUNDLE}"
+#
+# On nettoie les extended attributes (com.apple.FinderInfo / provenance…) JUSTE avant chaque
+# tentative : dans un dossier synchronisé iCloud Drive, le démon fileprovider les ré-applique,
+# ce qui fait échouer codesign (« resource fork … detritus not allowed »). D'où la boucle de
+# retry avec nettoyage immédiat à chaque essai.
+sign_app() {
+    xattr -cr "${APP_BUNDLE}" 2>/dev/null || true
+    codesign --force --deep -s - \
+        --identifier "fr.sncf.wifi-widget" \
+        --entitlements "Resources/entitlements.plist" \
+        "${APP_BUNDLE}"
+}
+
+for attempt in 1 2 3; do
+    if sign_app; then
+        break
+    fi
+    if [[ $attempt -eq 3 ]]; then
+        echo "❌ Échec de la signature après 3 tentatives." >&2
+        exit 1
+    fi
+    echo "↻ Signature échouée (attribut étendu ré-appliqué) — nouvelle tentative $((attempt + 1))/3…"
+    sleep 1
+done
 
 echo ""
 echo "✅ Application créée : ${APP_BUNDLE}"

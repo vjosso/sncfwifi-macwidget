@@ -1,34 +1,49 @@
 import Cocoa
 
 class StatusBarImageGenerator {
+    /// Largeur maximale de la pastille (px). Au-delà, le texte est tronqué avec « … ».
+    /// Borner la largeur évite que macOS masque complètement l'élément quand la barre
+    /// de menus est encombrée (notamment avec l'encoche des MacBook récents).
+    static let maxWidth: CGFloat = 150
+
     /// Génère une image pour la barre de menu avec le texte au-dessus et une jauge en dessous.
     /// - Parameters:
     ///   - text: Le texte à afficher (ex: "Paris 12min · 300km/h")
-    ///   - progress: La progression (dennnnn 0.0 à 1.0)
-    static func draw(text: String, progress: Double) -> NSImage? {
+    ///   - progress: La progression (de 0.0 à 1.0)
+    ///   - maxWidth: Largeur maximale de la pastille ; le texte est tronqué au-delà.
+    static func draw(text: String, progress: Double, maxWidth: CGFloat = StatusBarImageGenerator.maxWidth) -> NSImage? {
         let font = NSFont.systemFont(ofSize: 12, weight: .medium)
+
+        // Troncature en fin de ligne (« … ») si le texte dépasse la largeur autorisée.
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: NSColor.black // Sera transformé par isTemplate
+            .foregroundColor: NSColor.black, // Sera transformé par isTemplate
+            .paragraphStyle: paragraph
         ]
-        
+
         let attributedString = NSAttributedString(string: text, attributes: attributes)
-        let textSize = attributedString.size()
-        
+        let naturalSize = attributedString.size()
+
         let marginX: CGFloat = 4
-        let width = textSize.width + (marginX * 2)
+        // Largeur de texte disponible, plafonnée.
+        let maxTextWidth = max(0, maxWidth - marginX * 2)
+        let textWidth = min(naturalSize.width, maxTextWidth)
+        let width = textWidth + (marginX * 2)
         let height: CGFloat = 22 // Hauteur standard
-        
+
         let image = NSImage(size: NSSize(width: width, height: height))
         image.lockFocus()
-        
-        // 1. Dessiner le texte, décalé vers le haut pour laisser place à la barre
+
+        // 1. Dessiner le texte (tronqué si nécessaire), décalé vers le haut pour laisser place à la barre
         let textY: CGFloat = 6
-        let textRect = NSRect(x: marginX, y: textY, width: textSize.width, height: textSize.height)
+        let textRect = NSRect(x: marginX, y: textY, width: textWidth, height: naturalSize.height)
         attributedString.draw(in: textRect)
-        
+
         // 2. Dessiner la barre de fond
-        let barWidth = textSize.width
+        let barWidth = textWidth
         let barHeight: CGFloat = 2.5
         let barY: CGFloat = 2
         

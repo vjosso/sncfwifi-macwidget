@@ -2,6 +2,7 @@ import Cocoa
 import CoreLocation
 import CoreWLAN
 import UserNotifications
+import SwiftUI
 
 final class MenuBarController: NSObject {
 
@@ -12,6 +13,10 @@ final class MenuBarController: NSObject {
     private var timer: Timer?
     private var clockTimer: Timer?
     private var lastRawData: [String: Any]?
+
+    // Panneau flottant SwiftUI (remplace l'ancien NSMenu).
+    private let store = TrainStore()
+    private let popover = NSPopover()
 
     // Cache pour le redraw de l'icône sans appel API
     private var cachedArrivalDate: Date?
@@ -57,10 +62,12 @@ final class MenuBarController: NSObject {
         
         statusItem.button?.image = NSImage(systemSymbolName: "tram.fill", accessibilityDescription: "Train")
         statusItem.button?.imagePosition = .imageLeft
-        
-        let loading = NSMenu()
-        loading.addItem(label("Chargement…", symbol: "arrow.2.circlepath"))
-        statusItem.menu = loading
+
+        // Le clic sur l'icône ouvre/ferme le panneau flottant (et non un NSMenu).
+        statusItem.button?.action = #selector(togglePopover)
+        statusItem.button?.target = self
+
+        configurePopover()
 
         NotificationCenter.default.addObserver(self, selector: #selector(refresh), name: NSNotification.Name("DemoDataDidUpdate"), object: nil)
         
@@ -74,6 +81,41 @@ final class MenuBarController: NSObject {
         }
         clockTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             self?.redrawTitle()
+        }
+    }
+
+    // MARK: - Popover
+
+    private func configurePopover() {
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentViewController = NSHostingController(rootView: TrainPanelView().environmentObject(store))
+
+        // Branche les actions du panneau sur les handlers existants.
+        store.onRefresh = { [weak self] in self?.refresh() }
+        store.onQuit = { NSApp.terminate(nil) }
+        store.onSelectArrival = { [weak self] stopId in
+            UserDefaults.standard.set(stopId, forKey: "arrivalStationId")
+            self?.refresh()
+        }
+        store.onToggleDemo = { [weak self] in self?.toggleDemoMode() }
+        store.onOpenDemoPanel = { [weak self] in self?.openDemoControlPanel() }
+        store.onCopyJSON = { [weak self] in self?.copyDebugData() }
+        store.onOpenAbout = { [weak self] in self?.openAbout() }
+        store.onSettingsChanged = { [weak self] in
+            self?.lastArrivalNotifiedStopId = nil
+            self?.refresh()
+        }
+    }
+
+    @objc private func togglePopover() {
+        guard let button = statusItem.button else { return }
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
         }
     }
 
@@ -107,11 +149,7 @@ final class MenuBarController: NSObject {
                 } else {
                     timeStr = "\(diffMins)min"
                 }
-                t = t.isEmpty ? timeStr : "\(t) dans \(timeStr)"
-            }
-            if cachedSpeed > 0 {
-                let speedStr = "\(cachedSpeed)km/h"
-                t = t.isEmpty ? speedStr : "\(t) · \(speedStr)"
+                t = t.isEmpty ? timeStr : "\(t) · \(timeStr)"
             }
             text = t
         }
@@ -149,7 +187,8 @@ final class MenuBarController: NSObject {
                     guard let self else { return }
                     self.statusItem.button?.image = NSImage(systemSymbolName: "wifi.slash", accessibilityDescription: nil)
                     self.statusItem.button?.title = ""
-                    self.statusItem.menu = self.notConnectedMenu()
+                    self.store.lastRefreshDate = Date()
+                    self.store.state = .notConnected(demoMode: MockTrainData.shared.isEnabled)
                 }
                 return
             }
@@ -175,9 +214,10 @@ final class MenuBarController: NSObject {
             if gps == nil && details == nil {
                 self.statusItem.button?.image = NSImage(systemSymbolName: "wifi.slash", accessibilityDescription: nil)
                 self.statusItem.button?.title = ""
-                self.statusItem.menu = self.notConnectedMenu()
+                self.store.lastRefreshDate = Date()
+                self.store.state = .notConnected(demoMode: MockTrainData.shared.isEnabled)
             } else {
-                let (title, customImage, menu) = self.trainMenu(gps: gps, details: details, bar: bar, stats: stats, status: status)
+                let (title, customImage, viewState) = self.buildTrainState(gps: gps, details: details, bar: bar, stats: stats, status: status)
                 if let img = customImage {
                     self.statusItem.button?.title = ""
                     self.statusItem.button?.image = img
@@ -187,7 +227,8 @@ final class MenuBarController: NSObject {
                     self.statusItem.button?.imagePosition = .imageLeft
                     self.statusItem.button?.title = title.isEmpty ? "" : " \(title)"
                 }
-                self.statusItem.menu = menu
+                self.store.lastRefreshDate = Date()
+                self.store.state = .connected(viewState)
                 // Applique le texte delay-aware (rotation) après avoir peuplé le cache
                 if self.cachedArrivalDate != nil || self.cachedIsStopped {
                     self.redrawTitle()
@@ -196,124 +237,13 @@ final class MenuBarController: NSObject {
         }
     }
 
-    // MARK: - Menu: non connecté / API indisponible
+    // MARK: - Construction de l'état du train (modèle de vue)
 
-    private func notConnectedMenu() -> NSMenu {
-        let m = NSMenu()
-        if MockTrainData.shared.isEnabled {
-            m.addItem(infoLabel("Serveur Démo indisponible", symbol: "network.slash"))
-            m.addItem(infoLabel("Démarrer: ./start_demo_server.sh"))
-            m.addItem(infoLabel("URL: \(MockTrainData.shared.baseURLString)"))
-            m.addItem(.separator())
-
-            let openPanel = NSMenuItem(title: "Ouvrir le panneau Démo", action: #selector(openDemoControlPanel), keyEquivalent: "")
-            openPanel.target = self
-            m.addItem(openPanel)
-        } else {
-            m.addItem(infoLabel("Non connecté au WiFi SNCF inOui", symbol: "wifi.exclamationmark"))
-            m.addItem(infoLabel("(ou API du train indisponible)"))
-        }
-
-        m.addItem(.separator())
-
-        let settingsItem = label("Paramètres", symbol: "gearshape.fill")
-        let settingsMenu = NSMenu()
-
-        let notifyToggle = NSMenuItem(title: "Notification avant arrivée", action: #selector(toggleBeforeArrivalNotification), keyEquivalent: "")
-        notifyToggle.target = self
-        notifyToggle.state = isBeforeArrivalNotificationEnabled ? .on : .off
-        settingsMenu.addItem(notifyToggle)
-
-        let notifyDelayItem = NSMenuItem(title: "Délai de notification", action: nil, keyEquivalent: "")
-        let notifyDelayMenu = NSMenu()
-        let selectedLeadTime = beforeArrivalNotificationLeadTime
-        for minutes in allowedNotificationLeadTimes {
-            let item = NSMenuItem(title: "\(minutes) min", action: #selector(setBeforeArrivalNotificationLeadTime(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = minutes
-            item.state = (minutes == selectedLeadTime) ? .on : .off
-            notifyDelayMenu.addItem(item)
-        }
-        notifyDelayItem.submenu = notifyDelayMenu
-        notifyDelayItem.isEnabled = isBeforeArrivalNotificationEnabled
-        settingsMenu.addItem(notifyDelayItem)
-
-        let notifyTargetItem = NSMenuItem(title: "Type de notification", action: nil, keyEquivalent: "")
-        let notifyTargetMenu = NSMenu()
-
-        let selectedArrivalItem = NSMenuItem(title: "Gare d'arrivée sélectionnée", action: #selector(setNotificationTargetSelectedArrival), keyEquivalent: "")
-        selectedArrivalItem.target = self
-        selectedArrivalItem.state = (arrivalNotificationTarget == .selectedArrival) ? .on : .off
-        notifyTargetMenu.addItem(selectedArrivalItem)
-
-        let nextStopItem = NSMenuItem(title: "Prochaine gare", action: #selector(setNotificationTargetNextStop), keyEquivalent: "")
-        nextStopItem.target = self
-        nextStopItem.state = (arrivalNotificationTarget == .nextStop) ? .on : .off
-        notifyTargetMenu.addItem(nextStopItem)
-
-        notifyTargetItem.submenu = notifyTargetMenu
-        notifyTargetItem.isEnabled = isBeforeArrivalNotificationEnabled
-        settingsMenu.addItem(notifyTargetItem)
-
-        settingsItem.submenu = settingsMenu
-        settingsItem.isEnabled = true
-        m.addItem(settingsItem)
-
-        let debugItem = label("Debug", symbol: "ladybug.fill")
-        let debugMenu = NSMenu()
-
-        let demo = NSMenuItem(title: "Mode Démo (serveur local)", action: #selector(toggleDemoMode), keyEquivalent: "")
-        demo.target = self
-        demo.state = MockTrainData.shared.isEnabled ? .on : .off
-        debugMenu.addItem(demo)
-
-        let openPanel = NSMenuItem(title: "Ouvrir le panneau Démo", action: #selector(openDemoControlPanel), keyEquivalent: "")
-        openPanel.target = self
-        debugMenu.addItem(openPanel)
-
-        if let raw = lastRawData, !raw.isEmpty {
-            debugMenu.addItem(.separator())
-
-            let copyItem = label("Copier le JSON (presse-papiers)", symbol: "doc.on.doc.fill")
-            copyItem.target = self
-            copyItem.action = #selector(copyDebugData)
-            debugMenu.addItem(copyItem)
-
-            debugMenu.addItem(.separator())
-
-            if let g = raw["gps"] as? [String: Any], !g.isEmpty {
-                debugMenu.addItem(submenuItem(title: "API GPS (brut)", data: g, symbol: "network"))
-            }
-            if let d = raw["details"] as? [String: Any], !d.isEmpty {
-                debugMenu.addItem(submenuItem(title: "API Détails (brut)", data: d, symbol: "doc.text.fill"))
-            }
-            if let b = raw["bar"] as? [String: Any], !b.isEmpty {
-                debugMenu.addItem(submenuItem(title: "API Bar (brut)", data: b, symbol: "cup.and.saucer"))
-            }
-            if let s = raw["stats"] as? [String: Any], !s.isEmpty {
-                debugMenu.addItem(submenuItem(title: "API Stats (brut)", data: s, symbol: "antenna.radiowaves.left.and.right"))
-            }
-            if let n = raw["notification"] as? [String: Any], !n.isEmpty {
-                debugMenu.addItem(submenuItem(title: "Notification (calcul)", data: n, symbol: "bell"))
-            }
-        }
-
-        debugItem.submenu = debugMenu
-        debugItem.isEnabled = true
-        m.addItem(debugItem)
-
-        m.addItem(.separator())
-        appendFooter(to: m)
-        return m
-    }
-
-    // MARK: - Menu: données du train
-
-    private func trainMenu(gps: [String: Any]?,
-                           details: [String: Any]?,
-                           bar: [String: Any]?,
-                           stats: [String: Any]?,
-                           status: [String: Any]?) -> (String, NSImage?, NSMenu) {
+    private func buildTrainState(gps: [String: Any]?,
+                                 details: [String: Any]?,
+                                 bar: [String: Any]?,
+                                 stats: [String: Any]?,
+                                 status: [String: Any]?) -> (String, NSImage?, TrainViewState) {
 
         // L'API retourne la vitesse en m/s, on convertit en km/h
         let speedRaw = asDouble(gps?["speed"]) ?? 0.0
@@ -501,13 +431,12 @@ final class MenuBarController: NSObject {
             } else {
                 let shortDest = shortStationName(destLabel)
                 if !timeRemainingStr.isEmpty {
-                    text = "\(shortDest) dans\(timeRemainingStr)"
-                } else if !shortDest.isEmpty {
+                    // Priorité : nom de la gare + temps restant (ex. "Milano 1h05"), sans la vitesse.
+                    text = shortDest.isEmpty
+                        ? timeRemainingStr.trimmingCharacters(in: .whitespaces)
+                        : "\(shortDest) ·\(timeRemainingStr)"
+                } else {
                     text = shortDest
-                }
-                if speed > 0 {
-                    let speedStr = "\(speed)km/h"
-                    text = text.isEmpty ? speedStr : "\(text) · \(speedStr)"
                 }
             }
             
@@ -539,145 +468,7 @@ final class MenuBarController: NSObject {
             }
         }
 
-        // ── Construction du menu natif ──────────────────────────────────
-        let m = NSMenu()
-
-        // 1. En-tête : Numéro de train et destination
-        if let num = trainNumber {
-            var headerTitle = "TGV INOUI n° \(num)"
-            if let dest = destinationLabel {
-                headerTitle += " à destination de \(dest)"
-            }
-            m.addItem(infoLabel(headerTitle, symbol: "tram.fill"))
-            if trainDelayMins > 0 {
-                var delayLine = "Retard : +\(trainDelayMins) min"
-                if !trainDelayCause.isEmpty { delayLine += " (\(trainDelayCause))" }
-                m.addItem(infoLabel(delayLine, symbol: "exclamationmark.triangle.fill"))
-            }
-            m.addItem(.separator())
-        } else {
-            m.addItem(infoLabel("Train TGV INOUI", symbol: "tram.fill"))
-            m.addItem(.separator())
-        }
-
-        // 2. Desserte du train (tous les arrêts passés, actuels, futurs)
-        if !allStops.isEmpty {
-            for (i, stop) in allStops.enumerated() {
-                let lbl = (stop["label"] as? String) ?? "?"
-                let theoricDate = (stop["theoricDate"] as? String) // Date prévue de base
-                let realDate = (stop["realDate"] as? String) // Date réelle (peut être égale à theoric s'il n'y a pas de retard)
-                
-                let delay = (stop["delay"] as? Int) ?? 0 // Retard en minutes
-                
-                var timeStr = ""
-                // Si la date réelle est différente de la date théorique (et que delay > 0),
-                // on affiche l'heure théorique barrée suivie de l'heure réelle
-                let tTimeStr = formatTime(theoricDate) ?? ""
-                let rTimeStr = formatTime(realDate) ?? ""
-                
-                if delay > 0, rTimeStr != tTimeStr, !tTimeStr.isEmpty {
-                     // Utilisation des caractères Unicode pour barrer l'heure théorique (strikethrough)
-                     let strikethroughTime = tTimeStr.map { String($0) + "\u{0336}" }.joined()
-                     timeStr = "\(strikethroughTime)  \(rTimeStr) (+\(delay) min)"
-                } else {
-                     timeStr = rTimeStr
-                }
-                
-                var line = lbl
-                if !timeStr.isEmpty {
-                    line = timeStr + "    " + line
-                }
-                
-                var symbolStr = "circle" // Futur, pas encore atteint
-                if i < nextStopIndex {
-                    symbolStr = "checkmark.circle.fill" // Passé
-                } else if i == nextStopIndex {
-                    symbolStr = "record.circle.fill" // En cours ou prochain arrêt immédiat
-                }
-
-                m.addItem(infoLabel(line, symbol: symbolStr))
-            }
-
-            m.addItem(.separator())
-        }
-
-        // 3. Infos Vitesse
-        if speed > 0 {
-            m.addItem(infoLabel("Vitesse actuelle : \(speed) km/h", symbol: "speedometer"))
-        }
-
-        // 4. Qualité du WiFi inOui
-        if let stats = stats {
-            var networkStr = "Qualité WiFi"
-            var wifiSymbol = "wifi"
-            if let quality = stats["quality"] as? Int {
-                if quality < 3 { wifiSymbol = "wifi.exclamationmark" }
-                // Ajout d'une petite appréciation selon la note
-                let qualText = (quality >= 4) ? "Bonne" : (quality == 3 ? "Moyenne" : "Faible")
-                networkStr = "WiFi : \(quality)/5 (\(qualText))"
-            }
-            // "il faut prendre compte le nombre de personne connecté a celui-ci"
-            if let devices = stats["devices"] as? Int {
-                networkStr += " — \(devices) pers. connectées"
-            }
-            m.addItem(infoLabel(networkStr, symbol: wifiSymbol))
-        }
-
-        // 5. Consommation data
-        if let status = status {
-            let remaining = safeInt(status["remaining_data"])
-            let consumed = safeInt(status["consumed_data"])
-            let total = remaining + consumed
-
-            if total > 0 {
-                let remainingMB = String(format: "%.1f", Double(remaining) / 1000.0)
-                let consumedMB = String(format: "%.1f", Double(consumed) / 1000.0)
-                let totalMB = String(format: "%.1f", Double(total) / 1000.0)
-                let consumedRatio = Double(consumed) / Double(total)
-                let safeRatio = max(0.0, min(1.0, consumedRatio))
-                let safePct = Int((safeRatio * 100.0).rounded())
-                let usageBar = progressBar(progress: safeRatio, width: 18)
-
-                m.addItem(infoLabel("Data : \(consumedMB) / \(totalMB) Mo utilisés (\(safePct)%)", symbol: "arrow.up.arrow.down.circle"))
-                m.addItem(infoLabel("  \(usageBar)"))
-                m.addItem(infoLabel("  Restant : \(remainingMB) Mo"))
-            }
-
-            if let nextResetMs = asDouble(status["next_reset"]) {
-                let resetDate = Date(timeIntervalSince1970: nextResetMs / 1000.0)
-                let tf = MenuBarController.resetTimeFormatter
-                m.addItem(infoLabel("  Prochain reset : \(tf.string(from: resetDate))"))
-            }
-        }
-
-        if !allStops.isEmpty {
-            m.addItem(.separator())
-            let destItem = label("Gare d'arrivée...", symbol: "flag.fill")
-            let destMenu = NSMenu()
-            
-            let savedId = UserDefaults.standard.string(forKey: "arrivalStationId")
-            
-            // On ne propose que les gares futures ou la gare actuelle
-            // On peut autoriser toutes les gares pour la flexibilité
-            for (i, stop) in allStops.enumerated() {
-                let lbl = (stop["label"] as? String) ?? "Gare \(i)"
-                let stopId = (stop["id"] as? String) ?? lbl
-                let stopItem = NSMenuItem(title: lbl, action: #selector(self.setArrivalStation(_:)), keyEquivalent: "")
-                stopItem.representedObject = stopId
-                stopItem.target = self
-                
-                if savedId == stopId || (savedId == nil && i == allStops.count - 1) {
-                    stopItem.state = .on
-                }
-                destMenu.addItem(stopItem)
-            }
-            
-            destItem.submenu = destMenu
-            destItem.isEnabled = true
-            m.addItem(destItem)
-        }
-
-        // Sauvegarde des données brutes pour le mode Debug
+        // ── Sauvegarde des données brutes pour le mode Debug ────────────
         var rawData: [String: Any] = [:]
         let ssidInfo = currentSSIDInfo()
         rawData["ssid"] = ssidInfo.ssid
@@ -692,97 +483,74 @@ final class MenuBarController: NSObject {
         if let n = notificationDebug { rawData["notification"] = n }
         self.lastRawData = rawData
 
-        m.addItem(.separator())
+        // ── Construction du modèle de vue pour le panneau SwiftUI ───────
+        var viewState = TrainViewState(
+            trainNumber: trainNumber,
+            destination: destinationLabel,
+            delayMin: trainDelayMins,
+            delayCause: trainDelayCause,
+            stops: [],
+            globalProgress: cachedGlobalProgress,
+            speedKmh: speed,
+            wifiQuality: nil,
+            wifiDevices: nil,
+            dataConsumedMB: nil,
+            dataTotalMB: nil,
+            dataRemainingMB: nil,
+            dataRatio: nil,
+            dataResetTime: nil,
+            arrivalOptions: [],
+            selectedArrivalId: nil
+        )
 
-        let settingsItem = label("Paramètres", symbol: "gearshape.fill")
-        let settingsMenu = NSMenu()
-
-        let notifyToggle = NSMenuItem(title: "Notification avant arrivée", action: #selector(toggleBeforeArrivalNotification), keyEquivalent: "")
-        notifyToggle.target = self
-        notifyToggle.state = isBeforeArrivalNotificationEnabled ? .on : .off
-        settingsMenu.addItem(notifyToggle)
-
-        let notifyDelayItem = NSMenuItem(title: "Délai de notification", action: nil, keyEquivalent: "")
-        let notifyDelayMenu = NSMenu()
-        let selectedLeadTime = beforeArrivalNotificationLeadTime
-        for minutes in allowedNotificationLeadTimes {
-            let item = NSMenuItem(title: "\(minutes) min", action: #selector(setBeforeArrivalNotificationLeadTime(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = minutes
-            item.state = (minutes == selectedLeadTime) ? .on : .off
-            notifyDelayMenu.addItem(item)
+        // Desserte (timeline)
+        viewState.stops = allStops.enumerated().map { (i, stop) -> StopRow in
+            let lbl = (stop["label"] as? String) ?? "?"
+            let delay = (stop["delay"] as? Int) ?? 0
+            let status: StopStatus = i < nextStopIndex ? .passed : (i == nextStopIndex ? .current : .upcoming)
+            return StopRow(
+                id: (stop["id"] as? String) ?? "\(lbl)-\(i)",
+                label: lbl,
+                theoricTime: formatTime(stop["theoricDate"] as? String) ?? "",
+                realTime: formatTime(stop["realDate"] as? String) ?? "",
+                delayMin: delay,
+                status: status
+            )
         }
-        notifyDelayItem.submenu = notifyDelayMenu
-        notifyDelayItem.isEnabled = isBeforeArrivalNotificationEnabled
-        settingsMenu.addItem(notifyDelayItem)
 
-        let notifyTargetItem = NSMenuItem(title: "Type de notification", action: nil, keyEquivalent: "")
-        let notifyTargetMenu = NSMenu()
+        // Qualité WiFi
+        if let stats = stats {
+            viewState.wifiQuality = stats["quality"] as? Int
+            viewState.wifiDevices = stats["devices"] as? Int
+        }
 
-        let selectedArrivalItem = NSMenuItem(title: "Gare d'arrivée sélectionnée", action: #selector(setNotificationTargetSelectedArrival), keyEquivalent: "")
-        selectedArrivalItem.target = self
-        selectedArrivalItem.state = (arrivalNotificationTarget == .selectedArrival) ? .on : .off
-        notifyTargetMenu.addItem(selectedArrivalItem)
-
-        let nextStopItem = NSMenuItem(title: "Prochaine gare", action: #selector(setNotificationTargetNextStop), keyEquivalent: "")
-        nextStopItem.target = self
-        nextStopItem.state = (arrivalNotificationTarget == .nextStop) ? .on : .off
-        notifyTargetMenu.addItem(nextStopItem)
-
-        notifyTargetItem.submenu = notifyTargetMenu
-        notifyTargetItem.isEnabled = isBeforeArrivalNotificationEnabled
-        settingsMenu.addItem(notifyTargetItem)
-
-        settingsItem.submenu = settingsMenu
-        settingsItem.isEnabled = true
-        m.addItem(settingsItem)
-
-        let debugItem = label("Debug", symbol: "ladybug.fill")
-        let debugMenu = NSMenu()
-
-        let demo = NSMenuItem(title: "Mode Démo (serveur local)", action: #selector(toggleDemoMode), keyEquivalent: "")
-        demo.target = self
-        demo.state = MockTrainData.shared.isEnabled ? .on : .off
-        debugMenu.addItem(demo)
-
-        let openPanel = NSMenuItem(title: "Ouvrir le panneau Démo", action: #selector(openDemoControlPanel), keyEquivalent: "")
-        openPanel.target = self
-        debugMenu.addItem(openPanel)
-
-        if !rawData.isEmpty {
-            debugMenu.addItem(.separator())
-            let copyItem = label("Copier le JSON (presse-papiers)", symbol: "doc.on.doc.fill")
-            copyItem.target = self
-            copyItem.action = #selector(copyDebugData)
-            debugMenu.addItem(copyItem)
-
-            debugMenu.addItem(.separator())
-
-            if let g = gps, !g.isEmpty {
-                debugMenu.addItem(submenuItem(title: "API GPS (brut)", data: g, symbol: "network"))
+        // Consommation data
+        if let status = status {
+            let remaining = safeInt(status["remaining_data"])
+            let consumed = safeInt(status["consumed_data"])
+            let total = remaining + consumed
+            if total > 0 {
+                viewState.dataConsumedMB = Double(consumed) / 1000.0
+                viewState.dataTotalMB = Double(total) / 1000.0
+                viewState.dataRemainingMB = Double(remaining) / 1000.0
+                viewState.dataRatio = max(0.0, min(1.0, Double(consumed) / Double(total)))
             }
-            if let d = details, !d.isEmpty {
-                debugMenu.addItem(submenuItem(title: "API Détails (brut)", data: d, symbol: "doc.text.fill"))
-            }
-            if let b = bar, !b.isEmpty {
-                debugMenu.addItem(submenuItem(title: "API Bar (brut)", data: b, symbol: "cup.and.saucer"))
-            }
-            if let s = stats, !s.isEmpty {
-                debugMenu.addItem(submenuItem(title: "API Stats (brut)", data: s, symbol: "antenna.radiowaves.left.and.right"))
-            }
-            if let st = status, !st.isEmpty {
-                debugMenu.addItem(submenuItem(title: "API Status (brut)", data: st, symbol: "arrow.up.arrow.down.circle"))
+            if let nextResetMs = asDouble(status["next_reset"]) {
+                let resetDate = Date(timeIntervalSince1970: nextResetMs / 1000.0)
+                viewState.dataResetTime = MenuBarController.resetTimeFormatter.string(from: resetDate)
             }
         }
 
-        debugItem.submenu = debugMenu
-        debugItem.isEnabled = true
-        m.addItem(debugItem)
+        // Sélecteur de gare d'arrivée
+        viewState.arrivalOptions = allStops.enumerated().map { (i, stop) -> ArrivalOption in
+            let lbl = (stop["label"] as? String) ?? "Gare \(i)"
+            return ArrivalOption(id: (stop["id"] as? String) ?? lbl, label: lbl)
+        }
+        let savedId = UserDefaults.standard.string(forKey: "arrivalStationId")
+        let optionIds = viewState.arrivalOptions.map { $0.id }
+        viewState.selectedArrivalId = savedId.flatMap { optionIds.contains($0) ? $0 : nil } ?? optionIds.last
 
-        m.addItem(.separator())
-        appendFooter(to: m)
-
-        return (barTitle, customImage, m)
+        return (barTitle, customImage, viewState)
     }
 
     private func parseDate(_ isoString: String?) -> Date? {
@@ -832,80 +600,17 @@ final class MenuBarController: NSObject {
             "Marne-La-Vallée Chessy":               "Marne La Vallée",
         ]
         if let short = exact[name] { return short }
-        return name.count > 15 ? String(name.prefix(14)) + "…" : name
-    }
-
-    private func label(_ title: String, symbol: String? = nil) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        if let symbol = symbol, let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
-            item.image = img
+        if name.count <= 15 { return name }
+        // Nom long non répertorié : on garde le premier mot, qui est le plus souvent la ville
+        // (ex. "Milano Porta Garibaldi" → "Milano", "Torino Porta Susa" → "Torino").
+        if let firstWord = name.split(separator: " ").first, firstWord.count >= 3 {
+            return String(firstWord)
         }
-        return item
-    }
-
-    /// Item d'information non interactif mais visuellement lisible.
-    private func infoLabel(_ title: String, symbol: String? = nil) -> NSMenuItem {
-        let item = label(title, symbol: symbol)
-        item.target = self
-        item.action = #selector(noop)
-        item.isEnabled = true
-        return item
-    }
-
-    private func indent(_ title: String) -> NSMenuItem {
-        NSMenuItem(title: "  " + title, action: nil, keyEquivalent: "")
-    }
-
-    /// Crée un item avec sous-menu contenant toutes les paires clé/valeur aplaties.
-    private func submenuItem(title: String, data: [String: Any], symbol: String? = nil) -> NSMenuItem {
-        let item = label(title, symbol: symbol)
-        let sub  = NSMenu()
-        appendFlattened(data, prefix: "", to: sub)
-        item.submenu = sub
-        item.isEnabled = true
-        return item
-    }
-
-    private func appendFlattened(_ data: Any, prefix: String, to menu: NSMenu) {
-        if let dict = data as? [String: Any] {
-            for key in dict.keys.sorted() {
-                let p = prefix.isEmpty ? key : "\(prefix).\(key)"
-                appendFlattened(dict[key]!, prefix: p, to: menu)
-            }
-        } else if let arr = data as? [Any] {
-            for (i, v) in arr.enumerated() {
-                appendFlattened(v, prefix: "\(prefix)[\(i)]", to: menu)
-            }
-        } else {
-            menu.addItem(NSMenuItem(title: "  \(prefix): \(data)", action: nil, keyEquivalent: ""))
-        }
-    }
-
-    private func appendFooter(to menu: NSMenu) {
-        let r = NSMenuItem(title: "Actualiser", action: #selector(refresh), keyEquivalent: "r")
-        r.target = self
-        menu.addItem(r)
-
-        let a = NSMenuItem(title: "À propos", action: #selector(openAbout), keyEquivalent: "")
-        a.target = self
-        menu.addItem(a)
-
-        menu.addItem(.separator())
-
-        let q = NSMenuItem(title: "Quitter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        q.target = NSApp
-        menu.addItem(q)
+        return String(name.prefix(14)) + "…"
     }
 
     // MARK: - Handlers
 
-    @objc private func setArrivalStation(_ sender: NSMenuItem) {
-        if let stopId = sender.representedObject as? String {
-            UserDefaults.standard.set(stopId, forKey: "arrivalStationId")
-            refresh()
-        }
-    }
-    
     @objc private func toggleDemoMode() {
         MockTrainData.shared.isEnabled.toggle()
         if MockTrainData.shared.isEnabled {
@@ -919,38 +624,6 @@ final class MenuBarController: NSObject {
     @objc private func openDemoControlPanel() {
         guard let url = URL(string: MockTrainData.shared.baseURLString) else { return }
         NSWorkspace.shared.open(url)
-    }
-
-    @objc private func noop() {
-        // Intentionnellement vide.
-    }
-
-    @objc private func toggleBeforeArrivalNotification() {
-        isBeforeArrivalNotificationEnabled.toggle()
-        if !isBeforeArrivalNotificationEnabled {
-            lastArrivalNotifiedStopId = nil
-        }
-        refresh()
-    }
-
-    @objc private func setBeforeArrivalNotificationLeadTime(_ sender: NSMenuItem) {
-        guard let minutes = sender.representedObject as? Int,
-              allowedNotificationLeadTimes.contains(minutes) else { return }
-        beforeArrivalNotificationLeadTime = minutes
-        lastArrivalNotifiedStopId = nil
-        refresh()
-    }
-
-    @objc private func setNotificationTargetSelectedArrival() {
-        arrivalNotificationTarget = .selectedArrival
-        lastArrivalNotifiedStopId = nil
-        refresh()
-    }
-
-    @objc private func setNotificationTargetNextStop() {
-        arrivalNotificationTarget = .nextStop
-        lastArrivalNotifiedStopId = nil
-        refresh()
     }
 
     // MARK: - Conversions sûres
@@ -984,22 +657,6 @@ final class MenuBarController: NSObject {
             }
         }
         return nil
-    }
-
-    private func progressBar(progress: Double, width: Int) -> String {
-        let safeWidth = max(4, width)
-        let clamped = max(0.0, min(1.0, progress))
-        let cursorIndex = Int((clamped * Double(safeWidth - 1)).rounded())
-        var chars = Array<Character>(repeating: "─", count: safeWidth)
-
-        for i in 0..<safeWidth {
-            if i < cursorIndex {
-                chars[i] = "█"
-            }
-        }
-        chars[cursorIndex] = "●"
-
-        return "[" + String(chars) + "]"
     }
 
     private var isBeforeArrivalNotificationEnabled: Bool {

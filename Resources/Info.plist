@@ -16,6 +16,10 @@
     <key>CFBundleDisplayName</key>
     <string>SNCF WiFi</string>
 
+    <!-- Icône de l'app (Launchpad, Finder…). Fichier AppIcon.icns dans Contents/Resources/ -->
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>Votre position est utilisée pour détecter automatiquement le réseau WiFi des trains SNCF et économiser la batterie.</string>
 

@@ -91,4 +91,4 @@ Endpoints simulés :
 
 Ce projet a été développé en grande partie avec l'aide de l'Intelligence Artificielle.
 
-![GitHub Copilot](https://cwab.nuclearrockstone.xyz/api/badge?name=copilot&theme=dark)
+![Claude](https://cwab.nuclearrockstone.xyz/api/badge?name=claude&theme=dark)

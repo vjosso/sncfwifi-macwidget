@@ -1,0 +1,15 @@
+# Documentation locale Claude Code (non partagée)
+CLAUDE.md
+.claude/
+
+# macOS
+.DS_Store
+
+# Python (serveur de démo)
+__pycache__/
+*.pyc
+
+# Artefacts de build
+build/
+SNCFWifi.app/
+/tmp/
