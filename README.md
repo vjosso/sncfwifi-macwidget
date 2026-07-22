@@ -7,7 +7,6 @@
 Un widget pour la barre de menus macOS qui exploite l'API du portail WiFi TGV Inoui pour afficher en temps réel les informations de votre trajet : gare suivante, vitesse, retard, données mobiles, etc.
 
 <p align="center">
-  <img src="img/IMG1.png" width="45%" />
   <img src="img/GIF1.gif" width="45%" />
 </p>
 
