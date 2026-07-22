@@ -35,7 +35,9 @@ jobs:
           prerelease: false
           files: SNCFWifi.zip
           generate_release_notes: true
-          make_latest: false
+          # Marque cette release roulante comme « Latest » sur GitHub pour qu'elle
+          # soit mise en avant et téléchargeable directement par les utilisateurs.
+          make_latest: true
 
       # Push d'un tag (ex: v1.2.0) → Release officielle versionnée
       - name: Create versioned release
